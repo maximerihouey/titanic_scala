@@ -4,6 +4,10 @@ import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.sql.{DataFrame, Row, SQLContext}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.functions._
+import org.apache.spark.ml.feature.{IndexToString, VectorAssembler, StringIndexer}
+import org.apache.spark.ml.classification.RandomForestClassifier
+import org.apache.spark.ml.Pipeline
+
 
 /**
   * Created by maxime on 26/10/16.
@@ -24,10 +28,10 @@ object Titanic {
     // Feature engineering
     val numericFeatColNames = Seq("Age", "SibSp", "Parch", "Fare")
     val categoricalFeatColNames = Seq("Pclass", "Sex", "Embarked")
+    val consideredFeatures = numericFeatColNames ++ categoricalFeatColNames
 
     // Filling NaNs with average for numerical values
     val ageAvg = trainDFRaw.select("Age").union(testDFRaw.select("Age")).agg(avg("Age")).first().get(0)
-    println("Average age: %s".format(ageAvg))
     val fareAvg = trainDFRaw.select("Fare").union(testDFRaw.select("Fare")).agg(avg("Fare")).first().get(0)
     val fillNumNa = Map(
       "Fare" -> ageAvg,
@@ -36,17 +40,69 @@ object Titanic {
 
     // Filling empty categorical values with most frequent value (mode)
     val EmbarkedMode = trainDFRaw.select("Embarked").union(testDFRaw.select("Embarked"))
-                        .groupBy("Embarked")
-                        .agg(col("Embarked"), count("Embarked")).collect()
-    println("Embarked Mode")
-    println(EmbarkedMode)
-    println("Embarked Mode")
+                        .groupBy("Embarked").agg(count("Embarked").alias("count"))
+                        .sort(col("count").desc).first().get(0).toString()
+    val fillEmbarked: (String => String) = {
+      case "" => EmbarkedMode
+      case legit  => legit
+    }
+    val fillEmbarkedUDF = udf(fillEmbarked)
 
-    val trainDF = trainDFRaw.na.fill(fillNumNa)
-    val testDF = testDFRaw.na.fill(fillNumNa)
+    // Applying transformations
+    val trainDF = trainDFRaw.na.fill(fillNumNa).withColumn("Embarked", fillEmbarkedUDF(col("Embarked")))
+    val testDF = testDFRaw.na.fill(fillNumNa).withColumn("Embarked", fillEmbarkedUDF(col("Embarked")))
 
-    val ageAvg2 = trainDF.select("Age").union(testDF.select("Age")).agg(avg("Age")).first().get(0)
-    println("Average age2: %s".format(ageAvg2))
+    // Preparing pipeline with transformers
+
+    val allCatData = trainDF.select(categoricalFeatColNames.map(c => col(c)): _*).union(testDF.select(categoricalFeatColNames.map(c => col(c)): _*))
+    // allCatData.cache()
+
+    val stringIndexers = categoricalFeatColNames.map { colName =>
+      new StringIndexer()
+        .setInputCol(colName)
+        .setOutputCol(colName + "Indexed")
+        .fit(allCatData)
+    }
+
+    // index classes
+    val labelIndexer = new StringIndexer()
+      .setInputCol("Survived")
+      .setOutputCol("SurvivedIndexed")
+      .fit(trainDF)
+
+    // vector assembler
+    val predictionFeatures = numericFeatColNames ++ categoricalFeatColNames.map(_ + "Indexed")
+    val assembler = new VectorAssembler()
+      .setInputCols(Array(predictionFeatures: _*))
+      .setOutputCol("Features")
+
+    val randomForest = new RandomForestClassifier()
+      .setLabelCol("SurvivedIndexed")
+      .setFeaturesCol("Features")
+
+    val labelConverter = new IndexToString()
+      .setInputCol("prediction")
+      .setOutputCol("predictedLabel")
+      .setLabels(labelIndexer.labels)
+
+    // define the order of the operations to be performed
+    val pipeline = new Pipeline().setStages(
+      Array.concat(
+        stringIndexers.toArray, Array(labelIndexer, assembler, randomForest, labelConverter)
+      )
+    )
+
+    val predictions = pipeline.fit(trainDF).transform(testDF)
+
+    predictions
+      .withColumn("Survived", col("predictedLabel"))
+      .select("PassengerId", "Survived")
+      .coalesce(1)
+      .write
+      .format(csvFormat)
+      .option("header", "true")
+      .save("submission.csv")
+
   }
 
   def loadData(trainFile: String, testFile: String, sqlContext: SQLContext): (DataFrame, DataFrame) = {
