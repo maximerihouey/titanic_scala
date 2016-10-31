@@ -71,7 +71,7 @@ object Titanic {
       .fit(trainDF)
 
     // vector assembler
-    val predictionFeatures = numericFeatColNames ++ categoricalFeatColNames.map(_ + "Indexed")
+    val predictionFeatures = numericFeatColNames ++ categoricalFeatColNames.map(_ + "Indexed");
     val assembler = new VectorAssembler()
       .setInputCols(Array(predictionFeatures: _*))
       .setOutputCol("Features")
@@ -87,9 +87,7 @@ object Titanic {
 
     // define the order of the operations to be performed
     val pipeline = new Pipeline().setStages(
-      Array.concat(
-        stringIndexers.toArray, Array(labelIndexer, assembler, randomForest, labelConverter)
-      )
+      stringIndexers.toArray ++ Array(labelIndexer, assembler, randomForest, labelConverter)
     )
 
     val predictions = pipeline.fit(trainDF).transform(testDF)
