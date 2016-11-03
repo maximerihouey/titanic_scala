@@ -1,7 +1,6 @@
 package io.github.maximerihouey
 
-import org.apache.spark.{SparkConf, SparkContext}
-import org.apache.spark.sql.{DataFrame, Row, SQLContext}
+import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.functions._
 import org.apache.spark.ml.feature.{IndexToString, VectorAssembler, StringIndexer}
@@ -17,11 +16,12 @@ object Titanic {
   val csvFormat = "com.databricks.spark.csv"
 
   def main(args: Array[String]) {
-    val conf = new SparkConf().setAppName("Simple Application")
-    val sc = new SparkContext(conf)
-    val sqlContext = new SQLContext(sc)
+    val sparkSession = SparkSession.builder
+      .master("local")
+      .appName("titanic_scala")
+      .getOrCreate()
 
-    val (trainDFRaw, testDFRaw) = loadData("data/train.csv", "data/test.csv", sqlContext)
+    val (trainDFRaw, testDFRaw) = loadData("data/train.csv", "data/test.csv", sparkSession)
     println("Train size: %s".format(trainDFRaw.count()))
     println("Test size: %s".format(testDFRaw.count()))
 
@@ -53,10 +53,10 @@ object Titanic {
     val testDF = testDFRaw.na.fill(fillNumNa).withColumn("Embarked", fillEmbarkedUDF(col("Embarked")))
 
     // Preparing pipeline with transformers
-
     val allCatData = trainDF.select(categoricalFeatColNames.map(c => col(c)): _*).union(testDF.select(categoricalFeatColNames.map(c => col(c)): _*))
     // allCatData.cache()
 
+    // Indexing the categorical features
     val stringIndexers = categoricalFeatColNames.map { colName =>
       new StringIndexer()
         .setInputCol(colName)
@@ -64,26 +64,28 @@ object Titanic {
         .fit(allCatData)
     }
 
-    // index classes
+    // Indexing the survived categories
     val labelIndexer = new StringIndexer()
       .setInputCol("Survived")
       .setOutputCol("SurvivedIndexed")
       .fit(trainDF)
 
-    // vector assembler
+    // Labeling the predicted indexed survived categories
+    val labelConverter = new IndexToString()
+      .setInputCol("prediction")
+      .setOutputCol("predictedLabel")
+      .setLabels(labelIndexer.labels)
+
+    // Assembling the feature vector
     val predictionFeatures = numericFeatColNames ++ categoricalFeatColNames.map(_ + "Indexed");
     val assembler = new VectorAssembler()
       .setInputCols(Array(predictionFeatures: _*))
       .setOutputCol("Features")
 
+    // Prediction model
     val randomForest = new RandomForestClassifier()
       .setLabelCol("SurvivedIndexed")
       .setFeaturesCol("Features")
-
-    val labelConverter = new IndexToString()
-      .setInputCol("prediction")
-      .setOutputCol("predictedLabel")
-      .setLabels(labelIndexer.labels)
 
     // define the order of the operations to be performed
     val pipeline = new Pipeline().setStages(
@@ -100,10 +102,9 @@ object Titanic {
       .format(csvFormat)
       .option("header", "true")
       .save("submission.csv")
-
   }
 
-  def loadData(trainFile: String, testFile: String, sqlContext: SQLContext): (DataFrame, DataFrame) = {
+  def loadData(trainFile: String, testFile: String, sparkSession: SparkSession): (DataFrame, DataFrame) = {
 
     val nullable = true
     val schemaArray = Array(
@@ -124,13 +125,13 @@ object Titanic {
     val trainSchema = StructType(schemaArray)
     val testSchema = StructType(schemaArray.filter(p => p.name != "Survived"))
 
-    val trainDF = sqlContext.read
+    val trainDF = sparkSession.read
       .format(csvFormat)
       .option("header", "true")
       .schema(trainSchema)
       .load(trainFile)
 
-    val testDF = sqlContext.read
+    val testDF = sparkSession.read
       .format(csvFormat)
       .option("header", "true")
       .schema(testSchema)
